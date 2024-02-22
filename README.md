@@ -26,7 +26,6 @@ evaluation protocols, and metrics. Under review.
 
 After cloning the repository, install the requirements via conda or pip.
 
-
 ### Conda
 
 ```shell
@@ -65,12 +64,12 @@ There is a unique key (i.e., `"IMG_KEY"`) for each test image that
 refers to a list of word data in that image. Data for each word is
 comprised of a mapping containing the bounding polygon coordinates of
 the word in the image (`"points"`) and the textual transcription
-annotationin Unicode (`"text"` if applicable. The additional boolean
+annotation in Unicode (`"text"`), if applicable. The additional boolean
 flag `"ignore"` indicates the marked region as a "don't care" that
 will be discounted in evaluation. The `"text"` field is ignored in
 that case.
 
-The prediction format is identical except there is no `"ignore"` field.
+The prediction file format is identical except there is no `"ignore"` field.
 
 Detection-only tasks may also safely omit the `"text"` field from both
 ground truth and prediction files.
