@@ -1,0 +1,28 @@
+name: Linters
+
+on:
+  push:
+    paths:
+      - '*.py'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Run Linters
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Set up Python 3.9.18
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.9.18
+        cache: 'pip'
+    - name: Install Dependencies
+      run: |
+        pip install mypy pyflakes -r requirements.txt
+    - name: Run pyflakes
+      run: |
+        pyflakes *.py
+    - name: Run mypy
+      run: |
+        mypy *.py
