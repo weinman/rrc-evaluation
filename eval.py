@@ -548,7 +548,7 @@ def process_args(args: argparse.Namespace) -> \
     # Transcription/String Matching + Distance Functions
     if args.external_module is not None:
         try:
-            globals()['rrc'] = importlib.import_module(args.external_module)
+            rrc = importlib.import_module(args.external_module)
         except Exception as e:
             raise ImportError(f'Could not load external module specified {args.external_module}') from e
 
