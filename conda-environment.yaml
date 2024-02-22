@@ -1,0 +1,12 @@
+name: rrc-evaluation
+channels:
+  - defaults
+dependencies:
+  - python=3.9.18
+  - numpy=1.26.3
+  - scipy=1.11.4
+  - pip=23.3.1
+  - pip:
+      - polygon3==3.0.9.1
+      - pyeditdistance==1.0.1
+
