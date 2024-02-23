@@ -268,9 +268,11 @@ def calc_score_pairs( gt: list[WordData],
            'geometry' among others).
       pred : List of dicts containing predicted elements (each has the field
              'geometry' among others).
-    can_match
-      score_iou: Whether to factor IoU into correspondence scores
-      str_score: For E2E, function for string portion of score
+      can_match: Predicate indicating whether ground truth and prediction are 
+                   valid correspondence candidates
+      score_match: Function taking ground truth and predicted word dicts with 
+                    their pre-calculated iou score and returning their match 
+                    score (assumes they are valid matches)
     Returns
       allowed: MxN numpy bool array of can_match(g,d) correspondence candidates
       scores : MxN numpy float array of compatibility scores
@@ -344,8 +346,8 @@ def get_final_stats(totals: dict[str,Number],
       dict containing statistics with keys 'recall', 'precision',
         'fscore', 'tightness' (average IoU score),  'quality'
         (product of fscore and tightness), and (if 'rec' in task)
-       'char_accuracy' and 'char_quality' (product of quality and
-       char_accuracy).
+       'char_accuracy', 'char_quality' (product of quality and
+       char_accuracy), and 'cned' (average 1-NED).
     """
     final_stats = get_stats( totals['tp'],
                              totals['total_gt'],
@@ -419,6 +421,13 @@ def evaluate_image( gt: list[WordData],
       pred : List of dicts containing predicted elements for evaluation (each
              has the fields 'geometry' and (if task contains 'rec') 'text'.
       task : string describing the task (det, detrec)
+      can_match: Predicate indicating whether ground truth and prediction are 
+                   valid correspondence candidates
+      score_match: Function taking ground truth and predicted word dicts with 
+                    their pre-calculated iou score and returning their match 
+                    score (assumes they are valid matches)
+      str_score:    Function taking two strings to give a compatibility score 
+                      (i.e., 1-NED)
     Returns
       results : dict containing totals for the accumulator
       stats : dict containing statistics for this image
@@ -485,7 +494,6 @@ def evaluate(gt: dict[str,ImageData],
       final_stats : dict containing pooled statistics for the entire data set
       stats : dict containing statistics for each image in the data set
     """
-
     def accumulate( totals: dict[str,float], results: dict[str,float] ):
         """Side-effect totals by accumulating matching keys of results"""
         for (k,v) in results.items():
