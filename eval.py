@@ -17,18 +17,16 @@ this program. If not, see <https://www.gnu.org/licenses/>."""
 import json
 
 from typing import Union, Tuple, Any, Optional, Callable
+from functools import partial
 
 import re
 import logging
-import importlib
 import argparse
 
 import scipy  # type: ignore
 import numpy as np
 import numpy.typing as npt
 from Polygon import Polygon  # type: ignore
-
-from pyeditdistance.distance import normalized_levenshtein  # type: ignore
 
 
 # Minimum area of a polygon to be considered for area-based processing
@@ -46,12 +44,6 @@ parser.add_argument('--task', type=str, required=True,
                     help="Task to evaluate against")
 parser.add_argument('--output', type=str, required=False, default=None,
                     help="Path to the JSON file containing results")
-parser.add_argument('--score-fun', type=str, required=False, default='one',
-                    choices=['one','iou','iou*cned','cned'],
-                    help="Constraint-satisfying correspondence score")
-parser.add_argument('--string-match', default=True,
-                    action=argparse.BooleanOptionalAction,
-                    help="Require strings to match in detrec (end-to-end) task")
 parser.add_argument('--iou-threshold', type=float, default=0.5,
                     help="Minimum IoU for elements to be considered a match")
 parser.add_argument('--overlap-threshold', type=float, default=0.5,
@@ -59,8 +51,6 @@ parser.add_argument('--overlap-threshold', type=float, default=0.5,
 parser.add_argument('--use-case', default=True,
                     action=argparse.BooleanOptionalAction,
                     help='Evaluate recognition in a case-sensitive manner')
-parser.add_argument('--external-module', type=str, required=False, default=None,
-                    help='Use external transcription match/score functions')
 parser.add_argument('--cast-points-int', default=False,
                     action=argparse.BooleanOptionalAction,
                     help='Cast prediction coordinates to int type for processing')
@@ -77,20 +67,6 @@ Number = Union[int, float]
 
 def verify_args( args: argparse.Namespace ):
     """Verify command-line arguments are self-consistent and have valid values"""
-
-    #if args.string_match and 'rec' not in args.task:
-        # This is not a fatal error, but it doesn't make sense and could
-        # signal a user error/oversight
-        #logging.warning("string-match set for non-recognition task")
-
-    if args.external_module and 'rec' not in args.task:
-        # This is not a fatal error, but it doesn't make sense and could
-        # signal a user error/oversight
-        logging.warning("external-module set to load string functions for" +
-                        "non-recognition task")
-
-    if 'cned' in args.score_fun and 'rec' not in args.task:
-        raise ValueError("CNED scores can only be used with detrec (E2E) task ")
 
     if args.iou_threshold < 0 or args.iou_threshold > 1:
         raise ValueError("IoU threshold must be in [0,1]")
@@ -148,8 +124,22 @@ def load_ground_truth( gt_file: str,
 
     logging.info("Loading ground truth annotations...")
 
+    def is_ignore(line):
+        return line['category']=='illegible'
+
     with open(gt_file, encoding='utf-8') as fd:
-        gt = json.load(fd)
+        gt_raw = json.load(fd)
+
+    # Re-index: image-->lines, converting to keys for evaluator
+    gt = {}
+
+    for entry in gt_raw:
+        lines = [ { 'text':   line['transcription'],
+                    'points': line['vertices'],
+                    'ignore': is_ignore(line),
+                    'category': line['category'] }
+                  for line in entry['text'] ]
+        gt[entry['image_id']] = lines
 
     if image_regex:  # Filter to matching image keys
         regex = re.compile(image_regex)
@@ -164,7 +154,8 @@ def load_ground_truth( gt_file: str,
     if is_e2e and not use_case:  # Convert all to upper when ignoring case
         for img in gt:
             for word in gt[img]:
-                word['text'] = word['text'].upper()
+                if word['text'] != None:
+                    word['text'] = word['text'].upper()
     return gt
 
 
@@ -188,7 +179,21 @@ def load_predictions( preds_file: str,
     logging.info("Loading predictions...")
 
     with open(preds_file, encoding='utf-8') as fd:
-        preds = json.load(fd)
+        preds_raw = json.load(fd)
+
+    # Re-index: image-->lines, converting to keys for evaluator
+    preds = {}
+
+    for entry in preds_raw:
+        if is_e2e:
+            lines = [ { 'text':   line['transcription'],
+                        'points': line['vertices'] }
+                      for line in entry['text'] ]
+        else:
+            lines = [ { 'points': line['vertices'] }
+                      for line in entry['text'] ]
+
+        preds[entry['image_id']] = lines
 
     if image_regex:  # Filter to matching image keys
         regex = re.compile(image_regex)
@@ -254,6 +259,39 @@ def calc_iou( p: Polygon, q: Polygon ) -> float :
         return intersection / union
 
 
+def can_match( gt_el: WordData,
+               pred_el: WordData,
+               iou: float,
+               task: str,
+               iou_threshold: float) -> bool:
+    """Indicates whether a ground truth element and predicted element can
+    be a valid correspondence pair.
+
+    Arguments
+      gt_el: Ground truth element
+      pred_el: Prediction element
+      task: 'det' for Task 1: Detection, or 'detrec' for Tasks 2,3 (E2E)
+      iou: Pre-calculated IoU between gt_el and pred_el
+      iou_threshold: Minimum IoU required for a match
+    Returns
+      allowed: Whether a match of corresponding pair is valid/allowable
+    """
+    if gt_el['ignore']:
+        return False
+
+    if iou > iou_threshold:  # Geometric criterion
+        if task=='det':
+            return True
+        elif gt_el['text'] == None or len(gt_el['text']) == 0:
+            # If there's no transcription but ground truth is not an ignore,
+            # the geometric criterion must still be met to count as a match, 
+            # but no further string matching is required to accept it
+            return True
+        else:
+            return gt_el['text'] == pred_el['text'] # Text criterion
+    return False  # Fails geometric criterion
+
+
 def calc_score_pairs( gt: list[WordData],
                       pred: list[WordData],
                       can_match: Callable[[WordData,WordData,float],bool],
@@ -302,6 +340,13 @@ def calc_score_pairs( gt: list[WordData],
 
     return allowed,scores,ious
 
+def hmean( a: Number, b: Number ) -> Number:
+    """Calculate the Harmonic Mean between two values"""
+    if (a + b > 0):
+        return (2.0 * a * b) / (a + b)
+    else:
+        return 0.0
+
 
 def get_stats( num_tp: Number, num_gt: Number, num_pred: Number,
                tot_iou: Number, prefix: str = '') -> dict[str,float]:
@@ -322,8 +367,7 @@ def get_stats( num_tp: Number, num_gt: Number, num_pred: Number,
     recall    = float(num_tp) / num_gt   if (num_gt > 0)   else 0.0
     precision = float(num_tp) / num_pred if (num_pred > 0) else 0.0
     tightness = tot_iou / float(num_tp)  if (num_tp > 0)   else 0.0
-    fscore    = 2.0*recall*precision / (recall+precision) \
-        if (recall + precision > 0) else 0.0
+    fscore    = hmean(recall, precision)
     quality = tightness * fscore
 
     stats = {prefix+'recall'    : recall,
@@ -333,6 +377,28 @@ def get_stats( num_tp: Number, num_gt: Number, num_pred: Number,
              prefix+'quality'   : quality }
     return stats
 
+def get_occluded_stats( num_tp_occluded: Number, num_gt_occluded: Number,
+                            precision: float) -> dict[str,float]:
+    """Calculate occluded-specific statistics for recall and fscore.
+    Occluded recall is the proportion of GT occludeds detected. Occluded F-score
+    is between occluded recall and global precision, since submission is not
+    asked to label instances as either occluded or not occluded.
+
+    Arguments
+      num_tp_occluded : Number of true positives matching occluded ground truth
+      num_gt_occluded : Number of occluded ground truth positives in evaluation
+      precision       : Overall system precision
+    Returns
+      dict containing statistics with keys 'occluded_recall' and
+        'occluded_fscore'
+    """
+    recall = float(num_tp_occluded) / num_gt_occluded \
+        if (num_gt_occluded > 0) else 0.0
+    fscore = hmean(recall, precision)
+
+    stats = {'occluded_recall': recall,
+             'occluded_fscore': fscore }
+    return stats
 
 def get_final_stats(totals: dict[str,Number],
                     task : str) -> dict[str,Number] :
@@ -345,26 +411,16 @@ def get_final_stats(totals: dict[str,Number],
     Returns
       dict containing statistics with keys 'recall', 'precision',
         'fscore', 'tightness' (average IoU score),  'quality'
-        (product of fscore and tightness), and (if 'rec' in task)
-       'char_accuracy', 'char_quality' (product of quality and
-       char_accuracy), and 'cned' (average 1-NED).
+        (product of fscore and tightness), 'occluded_recall' and 
+        'occluded_fscore'.
     """
     final_stats = get_stats( totals['tp'],
                              totals['total_gt'],
                              totals['total_pred'],
                              totals['total_tightness'])
-    if 'rec' in task:
-        if totals['tp'] > 0:
-            accuracy = totals['total_rec_score'] / float(totals['tp'])
-        else:
-            accuracy = 0.0
-        final_stats['char_accuracy'] = accuracy
-        final_stats['char_quality'] = accuracy * final_stats['quality']
-        final_stats['cned'] = totals['total_rec_score'] / \
-            (totals['total_gt'] + totals['total_pred'] - totals['tp'])
-        # cned denom = |TP| + |FN| + |FP|
-        #        |G| = |TP| + |FN|,
-        #        |D| = |TP| + |FP|,  |FP| = |D| - |TP|
+    final_stats.update( get_occluded_stats( totals['tp_occluded'],
+                                            totals['total_gt_occluded'],
+                                            final_stats['precision'] ))
     return final_stats
 
 
@@ -452,31 +508,25 @@ def evaluate_image( gt: list[WordData],
 
     num_tp = len(matches_pred)
 
+    gt_occluded = np.asarray([ 'occluded' in el['category'] for el in gt],
+                             dtype=bool)
+
+    num_tp_occluded = int(np.sum( gt_occluded[matches_gt] ))
+    total_gt_occluded = int(np.sum(gt_occluded))
+
     # Accumulate tightness for matches that count (not ignorable)
     total_tightness = float(np.sum(matches_ious))
 
     results = { 'tp' : int(num_tp),
+                'tp_occluded' : int(num_tp_occluded),
                 'total_gt' : int(total_gt),
+                'total_gt_occluded': int(total_gt_occluded),
                 'total_pred' :  int(total_pred),
                 'total_tightness' : total_tightness }
 
     stats = get_stats( num_tp, total_gt, total_pred, total_tightness )
-
-    if 'rec' in task:
-        assert str_score is not None, \
-            "str_score must be defined for task 'detrec'"
-        # measure text (mis)prediction (i.e., 1-CER) for true positives
-        text_score_matches = [ str_score( gt[g]['text'], pred[p]['text'] )
-          for (g,p) in zip(matches_gt,matches_pred) ]
-        # tally scores among true positives
-        total_rec_score = sum( text_score_matches )
-
-        accuracy = total_rec_score / float(num_tp) if (num_tp > 0) else 0.0
-
-        stats['char_accuracy'] = accuracy
-        stats['char_quality']  = accuracy * stats['quality']
-
-        results['total_rec_score'] = total_rec_score
+    stats.update( get_occluded_stats( num_tp_occluded, total_gt_occluded,
+                                      stats['precision'] ) )
 
     return results, stats
 
@@ -501,11 +551,11 @@ def evaluate(gt: dict[str,ImageData],
 
     # initialize accumulator
     totals = { 'tp': 0,
+               'tp_occluded': 0,
                'total_pred': 0,
                'total_gt': 0,
+               'total_gt_occluded': 0,
                'total_tightness': 0.0 }
-    if 'rec' in task:
-        totals['total_rec_score'] = 0.0
 
     stats = {}  # Collected per-image statistics
 
@@ -527,19 +577,10 @@ def evaluate(gt: dict[str,ImageData],
 
 def process_args(args: argparse.Namespace) -> \
     Tuple[Callable[[WordData,WordData,float],bool],
-          Callable[[WordData,WordData,float],float],
-          Callable[[str,str],float]]:
-    """Process command-line arguments for specific functionality: string
-    match (bool) and score (i.e., 1-NED) functions as well as
+          Callable[[WordData,WordData,float],float]]:
+    """Process command-line arguments for specific functionality: 
     correspondence candidate criteria (bool) and match score (float)
     functions.
-
-    Returned function str_score may be the default or loaded from an
-    external module. Returned functions can_match and score_match are
-    established in part from command-line arguments, though when
-    can_match requires strings to match, the str_score function is
-    used and when score_match incorporates the 'cned' option, the
-    str_score function is used.
 
     Parameters
       args: The argparse Namespace object resulting from command-line invocation
@@ -550,45 +591,16 @@ def process_args(args: argparse.Namespace) -> \
       score_match:  Function taking ground truth and predicted word dicts with 
                       their pre-calculated iou score and returning their match 
                       score (assumes they are valid matches)
-      str_score:    Function taking two strings to give compatibility score 
-                      (i.e., 1-NED)
     """
-    # Transcription/String Matching + Distance Functions
-    if args.external_module is not None:
-        try:
-            rrc = importlib.import_module(args.external_module)
-        except Exception as e:
-            raise ImportError(f'Could not load external module specified {args.external_module}') from e
+    can_match_fn = partial( can_match,
+                            task=args.task,
+                            iou_threshold=args.iou_threshold)
 
-        is_str_match = rrc.transcription_match  # type: ignore
-        str_score = rrc.transcription_score  # type: ignore
-    else:
-        # Simple equality and complementary normalized edit distance (CNED)
-        is_str_match = lambda gs,ds: gs==ds
-        str_score = lambda gs,ds: 1 - normalized_levenshtein(gs,ds)
+    # Use 1.0 to optimize for F-score as the competition metric, or 
+    # use iou to optimize for HierText Panoptic Quality (PQ)
+    score_match = lambda g,d,iou: 1.0
 
-    # TODO: Allow can_match and score_match to be loaded from module
-    # for greater extensibility
-
-    # Set up matching functions
-    if 'rec' in args.task and args.string_match:
-        can_match = lambda g,d,iou: iou > args.iou_threshold and \
-            (not g['ignore']) and is_str_match(g['text'], d['text'])
-    else:
-        can_match = lambda g,d,iou: iou > args.iou_threshold and not g['ignore']
-
-    if args.score_fun=='one':
-        score_match = lambda g,d,iou: 1.0
-    elif args.score_fun=='iou':
-        score_match = lambda g,d,iou: iou
-    elif args.score_fun=='cned': # strictly speaking, this name is not precise
-        score_match = lambda g,d,iou: str_score(g['text'],d['text'])
-    elif args.score_fun=='iou*cned':
-        score_match = lambda g,d,iou: iou * str_score(g['text'],d['text'])
-    else:
-        raise ValueError(f'Unknown score method for argument score-fun: "{args.score_fun}"')  # shouldn't happen due to "choices" in argparser option
-
-    return can_match, score_match, str_score
+    return can_match_fn, score_match
 
 
 def main():
@@ -615,13 +627,12 @@ def main():
         warn_image_keys( gt_anno.keys(), preds.keys() )
 
     # Get coordinating functions
-    can_match, score_match, str_score = process_args(args)
+    can_match, score_match = process_args(args)
 
     overall,per_image = evaluate( gt_anno, preds,
                                   args.task,
                                   can_match,
-                                  score_match,
-                                  str_score )
+                                  score_match )
 
     print(overall)
 

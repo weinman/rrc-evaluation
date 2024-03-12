@@ -8,5 +8,3 @@ dependencies:
   - pip=23.3.1
   - pip:
       - polygon3==3.0.9.1
-      - pyeditdistance==1.0.1
-
