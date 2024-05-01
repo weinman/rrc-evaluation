@@ -20,7 +20,8 @@ Details may be found in the accompanying paper:
 
 Weinman, J., Gómez Grabowska, A., and Karatzas, D. (2024). Counting
 the corner cases: Revisiting robust reading challenge data sets,
-evaluation protocols, and metrics. Under review.
+evaluation protocols, and metrics. In 18th International Conference
+on Document Analysis and Recognition (ICDAR 2024). To appear.
 
 ## Installation
 
@@ -162,9 +163,13 @@ If you make use of this repository in your own research, we would appreciate a c
 
 ```bibtex
 @inproceedings{ weinman2024counting,
-   authors = {Weinman, Jerod and Gómez Grabowska, Amelia and Karatzas, Dimosthenes}
-   title = {Counting the corner cases: Revisiting robust reading challenge data sets, evaluation protocols, and metrics}
-   note = {Under review}
+   authors = {Weinman, Jerod and Gómez Grabowska, Amelia and Karatzas, Dimosthenis},
+   title = {Counting the corner cases: Revisiting robust reading challenge data sets, evaluation protocols, and metrics},
+   booktitle = {18th International Conference on Document Analysis and Recognition ({ICDAR} 2024)},
+   series = {Lecture Notes in Computer Science},
+   publisher = {Springer},
+   location = {Athens, Greece},
    year = {2024}
+   note = {To appear}
 }
 ```
