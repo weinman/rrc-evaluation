@@ -40,7 +40,7 @@ parser.add_argument('--gt', type=str, required=True,
 parser.add_argument('--pred', type=str, required=True,
                     help="Path to the predictions JSON file")
 parser.add_argument('--task', type=str, required=True,
-                    choices=['det', 'detrec'],
+                    choices=['det', 'detrec', 'singledetrec'],
                     help="Task to evaluate against")
 parser.add_argument('--output', type=str, required=False, default=None,
                     help="Path to the JSON file containing results")
@@ -48,7 +48,7 @@ parser.add_argument('--iou-threshold', type=float, default=0.5,
                     help="Minimum IoU for elements to be considered a match")
 parser.add_argument('--overlap-threshold', type=float, default=0.5,
                     help="Minimum overlap with a \"don't care\" GT to ignore detection")
-parser.add_argument('--use-case', default=True,
+parser.add_argument('--use-case', default=False,
                     action=argparse.BooleanOptionalAction,
                     help='Evaluate recognition in a case-sensitive manner')
 parser.add_argument('--cast-points-int', default=False,
@@ -110,7 +110,7 @@ def add_word_polygons( data: dict[str,ImageData],
 def load_ground_truth( gt_file: str,
                        is_e2e: bool,
                        image_regex: Optional[str] = None,
-                       use_case: Optional[bool] = True,
+                       use_case: Optional[bool] = False,
                        points_int_cast: bool = False) \
                        -> dict[str,ImageData]:
     """Load the ground truth file
@@ -162,7 +162,7 @@ def load_ground_truth( gt_file: str,
 def load_predictions( preds_file: str,
                       is_e2e: bool,
                       image_regex: Optional[str] = None,
-                      use_case: Optional[bool] = True,
+                      use_case: Optional[bool] = False,
                       points_int_cast: bool = False) -> dict[str,ImageData]:
     """Load the predictions file
 
@@ -205,7 +205,8 @@ def load_predictions( preds_file: str,
     if is_e2e and not use_case:  # Convert all to upper when ignoring case
         for img in preds:
             for word in preds[img]:
-                word['text'] = word['text'].upper()
+                if word['text'] != None:
+                    word['text'] = word['text'].upper()
 
     return preds
 
@@ -378,7 +379,7 @@ def get_stats( num_tp: Number, num_gt: Number, num_pred: Number,
     return stats
 
 def get_occluded_stats( num_tp_occluded: Number, num_gt_occluded: Number,
-                            precision: float) -> dict[str,float]:
+                       precision: float, prefix: str, include_fscore=True) -> dict[str,float]:
     """Calculate occluded-specific statistics for recall and fscore.
     Occluded recall is the proportion of GT occludeds detected. Occluded F-score
     is between occluded recall and global precision, since submission is not
@@ -396,8 +397,9 @@ def get_occluded_stats( num_tp_occluded: Number, num_gt_occluded: Number,
         if (num_gt_occluded > 0) else 0.0
     fscore = hmean(recall, precision)
 
-    stats = {'occluded_recall': recall,
-             'occluded_fscore': fscore }
+    stats = {prefix + "_recall": recall}
+    if include_fscore:
+        stats[prefix + "_fscore"] = fscore
     return stats
 
 def get_final_stats(totals: dict[str,Number],
@@ -418,9 +420,51 @@ def get_final_stats(totals: dict[str,Number],
                              totals['total_gt'],
                              totals['total_pred'],
                              totals['total_tightness'])
-    final_stats.update( get_occluded_stats( totals['tp_occluded'],
-                                            totals['total_gt_occluded'],
-                                            final_stats['precision'] ))
+    if task == "singledetrec":
+        final_stats.update(
+            get_occluded_stats(
+                totals["tp_occluded_visible"] + totals["tp_occluded_inferable"],
+                totals["total_gt_occluded_visible"] + totals["total_gt_occluded_inferable"],
+                final_stats["precision"],
+                "occluded",
+            )
+        )
+    else:
+        final_stats.update(
+            get_occluded_stats(
+                totals["tp_occluded"],
+                totals["total_gt_occluded"],
+                final_stats["precision"],
+                "occluded",
+            )
+        )
+    final_stats.update(
+        get_occluded_stats(
+            totals["tp_occluded_visible"],
+            totals["total_gt_occluded_visible"],
+            final_stats["precision"],
+            "occluded_visible",
+            include_fscore=False,
+        )
+    )
+    final_stats.update(
+        get_occluded_stats(
+            totals["tp_occluded_inferable"],
+            totals["total_gt_occluded_inferable"],
+            final_stats["precision"],
+            "occluded_inferable",
+            include_fscore=False,
+        )
+    )
+    final_stats.update(
+        get_occluded_stats(
+            totals["tp_occluded_indeterminate"],
+            totals["total_gt_occluded_indeterminate"],
+            final_stats["precision"],
+            "occluded_indeterminate",
+            include_fscore=False,
+        )
+    )
     return final_stats
 
 
@@ -511,22 +555,87 @@ def evaluate_image( gt: list[WordData],
     gt_occluded = np.asarray([ 'occluded' in el['category'] for el in gt],
                              dtype=bool)
 
+    gt_occluded_visible = np.asarray(
+        ["occluded_english_1" == el["category"] for el in gt], dtype=bool
+    )  # the occluded text is visible text instance in the image
+    gt_occluded_inferable = np.asarray(
+        ["occluded_english_2" == el["category"] for el in gt], dtype=bool
+    )  # the occluded text can be infered from visual cues or common knowledge
+    gt_occluded_indeterminate = np.asarray(
+        ["occluded_english_3" == el["category"] for el in gt], dtype=bool
+    )  # the occluded text can only be infered from the supplementary images
+
     num_tp_occluded = int(np.sum( gt_occluded[matches_gt] ))
     total_gt_occluded = int(np.sum(gt_occluded))
+
+    num_tp_occluded_visible = int(np.sum(gt_occluded_visible[matches_gt]))
+    total_gt_occluded_visible = int(np.sum(gt_occluded_visible))
+
+    num_tp_occluded_inferable = int(np.sum(gt_occluded_inferable[matches_gt]))
+    total_gt_occluded_inferable = int(np.sum(gt_occluded_inferable))
+
+    num_tp_occluded_indeterminate = int(np.sum(gt_occluded_indeterminate[matches_gt]))
+    total_gt_occluded_indeterminate = int(np.sum(gt_occluded_indeterminate))
 
     # Accumulate tightness for matches that count (not ignorable)
     total_tightness = float(np.sum(matches_ious))
 
     results = { 'tp' : int(num_tp),
                 'tp_occluded' : int(num_tp_occluded),
+                'tp_occluded_visible': int(num_tp_occluded_visible),
+                'tp_occluded_inferable': int(num_tp_occluded_inferable),
+                'tp_occluded_indeterminate': int(num_tp_occluded_indeterminate),
                 'total_gt' : int(total_gt),
                 'total_gt_occluded': int(total_gt_occluded),
+                'total_gt_occluded_visible': int(total_gt_occluded_visible),
+                'total_gt_occluded_inferable': int(total_gt_occluded_inferable),
+                'total_gt_occluded_indeterminate': int(total_gt_occluded_indeterminate),
                 'total_pred' :  int(total_pred),
                 'total_tightness' : total_tightness }
 
     stats = get_stats( num_tp, total_gt, total_pred, total_tightness )
-    stats.update( get_occluded_stats( num_tp_occluded, total_gt_occluded,
-                                      stats['precision'] ) )
+    if task == "singledetrec":
+        stats.update(
+            get_occluded_stats(
+                num_tp_occluded_visible + num_tp_occluded_inferable,
+                total_gt_occluded_inferable + total_gt_occluded_indeterminate,
+                stats["precision"],
+                "occluded",
+            )
+        )
+    else:
+        stats.update(
+            get_occluded_stats(
+                num_tp_occluded, total_gt_occluded, stats["precision"], "occluded"
+            )
+        )
+    stats.update(
+        get_occluded_stats(
+            num_tp_occluded_visible,
+            total_gt_occluded_visible,
+            stats["precision"],
+            "occluded_visible",
+            include_fscore=False,
+        )
+    )
+    stats.update(
+        get_occluded_stats(
+            num_tp_occluded_inferable,
+            total_gt_occluded_inferable,
+            stats["precision"],
+            "occluded_inferable",
+            include_fscore=False,
+        )
+    )
+    stats.update(
+        get_occluded_stats(
+            num_tp_occluded_indeterminate,
+            total_gt_occluded_indeterminate,
+            stats["precision"],
+            "occluded_indeterminate",
+            include_fscore=False,
+        )
+    )
 
     return results, stats
 
@@ -552,9 +661,15 @@ def evaluate(gt: dict[str,ImageData],
     # initialize accumulator
     totals = { 'tp': 0,
                'tp_occluded': 0,
+               'tp_occluded_visible': 0,
+               'tp_occluded_inferable': 0,
+               'tp_occluded_indeterminate': 0,
                'total_pred': 0,
                'total_gt': 0,
                'total_gt_occluded': 0,
+               'total_gt_occluded_visible': 0,
+               'total_gt_occluded_inferable': 0,
+               'total_gt_occluded_indeterminate': 0,
                'total_tightness': 0.0 }
 
     stats = {}  # Collected per-image statistics

@@ -17,6 +17,8 @@ this program. If not, see <https://www.gnu.org/licenses/>."""
 
 
 import eval as rrc
+import json
+import shapely # type: ignore
 
 from typing import Any
 from functools import partial
@@ -41,6 +43,58 @@ def validate_data( gtFilePath: str,
     Returns
       Nothing, but raises errors if there is any problem
       """
+    with open(gtFilePath) as f:
+        ground_truth = json.load(f)
+    with open(submFilePath) as f:
+        submission = json.load(f)
+
+    if not isinstance(submission, list):
+        raise TypeError("submission must be a list")
+
+    gt_image_ids = [entry["image_id"] for entry in ground_truth]
+    subm_image_ids = [entry["image_id"] for entry in submission]
+
+    for gt in gt_image_ids:
+        if gt not in subm_image_ids:
+            raise ValueError("Image IDs missing in submission")
+    for pred in subm_image_ids:
+        if pred not in gt_image_ids:
+            raise ValueError("Extra image IDs found in submission")
+
+    for item in submission:
+        if not isinstance(item, dict):
+            raise TypeError("Each item in submission must be a dictionary")
+
+        if "image_id" not in item or not isinstance(item["image_id"], str):
+            raise ValueError("image_id is missing or not a string")
+
+        if "text" not in item or not isinstance(item["text"], list):
+            raise ValueError("text is missing or not a list")
+
+        for detection in item["text"]:
+            if not isinstance(detection, dict):
+                raise TypeError("Each detection must be a dictionary")
+
+            if "vertices" not in detection or not isinstance(
+                detection["vertices"], list
+            ):
+                raise ValueError("vertices is missing or not a list")
+
+            geom = shapely.geometry.Polygon(detection["vertices"])
+            if not geom.is_simple:
+                raise ValueError(
+                    "vertices not valid - {}".format(detection["vertices"])
+                )
+
+            for vertex in detection["vertices"]:
+                if not isinstance(vertex, list) or len(vertex) != 2:
+                    raise ValueError(
+                        "Each vertex must be a list of two x and y coordinates"
+                    )
+
+                if not all(isinstance(coord, (int, float)) for coord in vertex):
+                    raise ValueError("Coordinates must be integers or floats")
+
     return
 
 
@@ -70,6 +124,9 @@ def evaluate_method( gtFilePath: str,
             'precision',
             'recall',
             'occluded_recall',
+            "occluded_visible_recall",
+            "occluded_inferable_recall",
+            "occluded_indeterminate_recall",
             'occluded_fscore']
         return metrics
 

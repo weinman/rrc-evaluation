@@ -8,3 +8,4 @@ dependencies:
   - pip=23.3.1
   - pip:
       - polygon3==3.0.9.1
+      - shapely==2.0.3
